@@ -4,9 +4,6 @@ import logging
 import os
 
 
-from boto3.dynamodb.conditions import Key, Attr
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -127,7 +124,6 @@ class DynamoTransfer(object):
 class Tile(object):
     def __init__(self, app_config):
         """
-        
         :param app_config: Flask app config object.
         """
         self.app_config = app_config
@@ -147,4 +143,3 @@ class Tile(object):
     def all(self):
         """Return all apps."""
         pass
-
