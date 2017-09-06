@@ -1,12 +1,29 @@
 """User class that governs maniuplation of session['userdata']"""
+import http.client
+import json
 import logging
 import requests
+import time
 
-
+from config import OIDCConfig
 from models import alert
 
 
 logger = logging.getLogger(__name__)
+
+
+class DotDict(dict):
+    """return a dict.item notation for dict()'s"""
+
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+    def __init__(self, dct):
+        for key, value in dct.items():
+            if hasattr(value, 'keys'):
+                value = DotDict(value)
+            self[key] = value
 
 
 class Mozillians(object):
@@ -72,6 +89,100 @@ class Mozillians(object):
 
         return avatar_url
 
+class AuthZero(object):
+    def __init__(self):
+        self.default_headers = {
+            'content-type': "application/json"
+        }
+        self.oidc_config = OIDCConfig()
+        self.client_id = self.oidc_config.OIDC_CLIENT_ID
+        self.client_secret = self.oidc_config.OIDC_CLIENT_SECRET
+
+        self.access_token = None
+        self.access_token_scope = None
+        self.access_token_valid_until = 0
+
+        self.conn = http.client.HTTPSConnection(self.oidc_config.OIDC_DOMAIN)
+
+    def __del__(self):
+        self.client_secret = None
+        self.conn.close()
+
+    def get_user(self, user_id):
+        """Return user from the auth0 API.
+        user_id: string
+        returns: JSON dict of the user profile
+        """
+
+        payload = DotDict(dict())
+        payload_json = json.dumps(payload)
+        self.conn.request("GET",
+                          "/api/v2/users/{}".format(user_id),
+                          payload_json,
+                          self._authorize(self.default_headers))
+        res = self.conn.getresponse()
+        self._check_http_response(res)
+        user = DotDict(json.loads(res.read()))
+
+        return user
+
+    def get_logs(self, email):
+        payload = DotDict(dict())
+        payload_json = json.dumps(payload)
+        self.conn.request("GET",
+                          "/api/v2/logs?per_page=100&search={}".format(email),
+                          payload_json,
+                          self._authorize(self.default_headers))
+        res = self.conn.getresponse()
+        self._check_http_response(res)
+        return json.loads(res.read())
+
+    def get_access_token(self):
+        """
+        Returns a JSON object containing an OAuth access_token.
+        This is also stored in this class other functions to use.
+        """
+        payload = DotDict(dict())
+        payload.client_id = self.client_id
+        payload.client_secret = self.client_secret
+        payload.audience = "https://{}/api/v2/".format(self.oidc_config.OIDC_DOMAIN)
+        payload.grant_type = "client_credentials"
+        payload_json = json.dumps(payload)
+
+        self.conn.request("POST", "/oauth/token", payload_json, self.default_headers)
+        res = self.conn.getresponse()
+        self._check_http_response(res)
+
+        access_token = DotDict(json.loads(res.read()))
+        # Validation
+        if ('access_token' not in access_token.keys()):
+            raise Exception('InvalidAccessToken', access_token)
+        self.access_token = access_token.access_token
+        self.access_token_valid_until = time.time() + access_token.expires_in
+        self.access_token_scope = access_token.scope
+
+        return access_token
+
+    def _authorize(self, headers):
+        if not self.access_token:
+            raise Exception('InvalidAccessToken')
+        if self.access_token_valid_until < time.time():
+            raise Exception('InvalidAccessToken', 'The access token has expired')
+
+        local_headers = {}
+        local_headers.update(headers)
+        local_headers['Authorization'] = 'Bearer {}'.format(self.access_token)
+
+        return local_headers
+
+    def _check_http_response(self, response):
+        """Check that we got a 2XX response from the server, else bail out"""
+        if (response.status >= 300) or (response.status < 200):
+            self.logger.debug("_check_http_response() HTTP communication failed: {} {}".format(
+                response.status, response.reason, response.read()
+                )
+            )
+            raise Exception('HTTPCommunicationFailed', (response.status, response.reason))
 
 class User(object):
     def __init__(self, session, app_config):
@@ -123,6 +234,27 @@ class User(object):
     def user_identifiers(self):
         """Construct a list of potential user identifiers to match on."""
         return [self.userinfo['email'], self.userinfo['user_id']]
+
+    @property
+    def authzero_profile(self):
+        a = AuthZero()
+        a.get_access_token()
+        return a.get_user(self.userinfo['user_id'])
+
+    @property
+    def authzero_logs(self):
+        a = AuthZero()
+        a.get_access_token()
+        return a.get_logs(self.userinfo['emails'][0]['value'])
+
+    @property
+    def frequently_used(self):
+        logs = self.authzero_logs
+
+        used_apps = []
+
+        for entry in logs:
+            used_apps.append(entry.get('client_id'))
 
     @property
     def alerts(self):
