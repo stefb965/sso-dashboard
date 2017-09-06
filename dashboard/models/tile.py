@@ -3,6 +3,8 @@ import boto3
 import logging
 import os
 
+from boto3.dynamodb.conditions import Attr
+
 
 logger = logging.getLogger(__name__)
 
